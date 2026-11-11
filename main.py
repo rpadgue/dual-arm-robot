@@ -3,6 +3,7 @@ import time
 import pybullet as p
 import pybullet_data
 import numpy as np
+from scipy.optimize import minimize
 
 #connect to the simulator.
 physics_client = p.connect(p.GUI)
@@ -84,7 +85,7 @@ for joint_index in range(p.getNumJoints(robot_a)):
 end_effector_index = 6
 
 # Desired end-effector position in world coordinates (meters).
-target_position = [-0.35, 0.0, 0.55]
+target_position = [-0.45, 0.0, 0.65]
 
 # Joint limits from the robot's URDF.
 lower_limits = []
@@ -101,7 +102,7 @@ joint_ranges = [
     for lower, upper in zip(lower_limits, upper_limits)
 ]
 
-rest_poses = [0.0] * 7
+rest_poses = [0.0, 0.3, 0.0, -1.2, 0.0, 0.5, 0.0]
 
 # Calculate IK using joint-limit information.
 joint_angles = p.calculateInverseKinematics(
@@ -117,6 +118,129 @@ joint_angles = p.calculateInverseKinematics(
 )
 
 print("Calculated IK joint angles:", joint_angles)
+
+
+# STEP 1: Calculate initial IK solution.
+joint_angles = p.calculateInverseKinematics(
+    bodyUniqueId=robot_a,
+    endEffectorLinkIndex=end_effector_index,
+    targetPosition=target_position,
+    lowerLimits=lower_limits,
+    upperLimits=upper_limits,
+    jointRanges=joint_ranges,
+    restPoses=rest_poses,
+    maxNumIterations=1000,
+    residualThreshold=1e-6
+)
+
+print("Calculated IK joint angles:", joint_angles)
+
+
+# STEP 2: Refine the IK solution with joint limits.
+initial_angles = np.array(joint_angles[:7])
+joint_bounds = list(zip(lower_limits, upper_limits))
+
+def position_error_squared(angles):
+    # Temporarily set candidate joint angles.
+    for i, angle in enumerate(angles):
+        p.resetJointState(robot_a, i, float(angle))
+
+    # Calculate forward kinematics.
+    link_state = p.getLinkState(
+        robot_a,
+        end_effector_index,
+        computeForwardKinematics=True
+    )
+
+    actual_position = np.array(link_state[4])
+    desired_position = np.array(target_position)
+
+    return np.sum((desired_position - actual_position) ** 2)
+
+result = minimize(
+    position_error_squared,
+    initial_angles,
+    method="SLSQP",
+    bounds=joint_bounds,
+    options={
+        "maxiter": 500,
+        "ftol": 1e-12
+    }
+)
+
+joint_angles = result.x
+
+print("Optimization successful:", result.success)
+print("Refined joint angles:", joint_angles)
+print(
+    "Predicted positioning error:",
+    np.sqrt(result.fun) * 1000,
+    "mm"
+)
+
+
+# STEP 3: Command Robot A to the refined joint angles.
+for joint_index in range(7):
+    p.setJointMotorControl2(
+        bodyUniqueId=robot_a,
+        jointIndex=joint_index,
+        controlMode=p.POSITION_CONTROL,
+        targetPosition=float(joint_angles[joint_index]),
+        force=200
+    )
+
+    # ROBOT B: Calculate inverse kinematics.
+
+target_position_b = [0.45, 0.0, 0.65]
+
+joint_angles_b = p.calculateInverseKinematics(
+    bodyUniqueId=robot_b,
+    endEffectorLinkIndex=end_effector_index,
+    targetPosition=target_position_b,
+    lowerLimits=lower_limits,
+    upperLimits=upper_limits,
+    jointRanges=joint_ranges,
+    restPoses=rest_poses,
+    maxNumIterations=1000,
+    residualThreshold=1e-6
+)
+
+print("Robot B IK angles:", joint_angles_b)
+
+# Command Robot B to move.
+for joint_index in range(7):
+    p.setJointMotorControl2(
+        bodyUniqueId=robot_b,
+        jointIndex=joint_index,
+        controlMode=p.POSITION_CONTROL,
+        targetPosition=joint_angles_b[joint_index],
+        force=200
+    )
+
+# Draw Robot B's target marker.
+p.addUserDebugLine(
+    lineFromXYZ=target_position_b,
+    lineToXYZ=[
+        target_position_b[0],
+        target_position_b[1],
+        target_position_b[2] + 0.15
+    ],
+    lineColorRGB=[0, 1, 0],
+    lineWidth=3
+)
+
+# STEP 4: Draw the target marker.
+p.addUserDebugLine(
+    lineFromXYZ=target_position,
+    lineToXYZ=[
+        target_position[0],
+        target_position[1],
+        target_position[2] + 0.15
+    ],
+    lineColorRGB=[1, 0, 0],
+    lineWidth=3
+)
+
 
 # Command Robot A's joints to the calculated angles.
 for joint_index in range(7):
@@ -170,6 +294,22 @@ try:
             print(
                 f"End-effector error: {error * 1000:.2f} mm"
             )
+
+            # Measure Robot B's end-effector positioning error.
+            link_state_b = p.getLinkState(
+                robot_b,
+                end_effector_index,
+                computeForwardKinematics=True
+            )
+
+            actual_position_b = np.array(link_state_b[4])
+            desired_position_b = np.array(target_position_b)
+
+            error_b = np.linalg.norm(
+                desired_position_b - actual_position_b
+            )
+
+            print(f"Robot B end-effector error: {error_b * 1000:.2f} mm")
 
             # Compare actual joint angles against IK targets.
             for joint_index in range(7):
