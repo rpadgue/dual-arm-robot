@@ -266,11 +266,88 @@ p.addUserDebugLine(
 
 #--------------------------------
 
+#Reset both arms to known starting configurations.
+start_angles_a = [0.0] * 7
+start_angles_b = [0.0] * 7
+
+#Store the target configurations for synchronized movement.
+goal_angles_a = np.array(joint_angles[:7], dtype=float)
+goal_angles_b = np.array(joint_angles_b[:7], dtype=float)
+
+#Convert starting configurations to NumPy arrays.
+start_angles_a = np.array(start_angles_a, dtype=float)
+start_angles_b = np.array(start_angles_b, dtype=float)
+
+#Set the trajectory duration.
+movement_duration = 5.0
+
+for joint_index in range(7):
+    p.resetJointState(
+        robot_a,
+        joint_index,
+        start_angles_a[joint_index]
+    )
+
+    p.resetJointState(
+        robot_b,
+        joint_index,
+        start_angles_b[joint_index]
+    )
+
+print("Both arms reset to starting configurations.")
+
 # Run the physics simulation.
 try:
     step_count = 0
 
     while p.isConnected():
+        #Calculate elapsed simulation time.
+        elapsed_time = step_count / 240.0
+
+        #Normalized progress from 0 to 1.
+        progress = min(elapsed_time / movement_duration, 1.0)
+
+        #Smooth interpolation for gradual acceleration/deceleration.
+        smooth_progress = 3 * progress**2 - 2 * progress**3
+
+        #Check trajectory progress.
+        if step_count % 240 == 0:
+            print(
+                f"Time: {elapsed_time:.1f}s, "
+                f"Progress: {progress:.2f}, "
+                f"Smooth progress: {smooth_progress:.2f}"
+            )
+
+        #Calculate synchronized joint targets.
+        current_angles_a = (
+            start_angles_a
+            + smooth_progress * (goal_angles_a - start_angles_a)
+        )
+
+        current_angles_b = (
+            start_angles_b
+            + smooth_progress * (goal_angles_b - start_angles_b)
+        )
+
+        #Command both arms to synchronized targets.
+        for joint_index in range(7):
+            p.setJointMotorControl2(
+                robot_a,
+                joint_index,
+                p.POSITION_CONTROL,
+                targetPosition=float(current_angles_a[joint_index]),
+                force=200
+            )
+
+            p.setJointMotorControl2(
+                robot_b,
+                joint_index,
+                p.POSITION_CONTROL,
+                targetPosition=float(current_angles_b[joint_index]),
+                force=200
+            )
+
+        #Advance simulation.
         p.stepSimulation()
         step_count += 1
 
