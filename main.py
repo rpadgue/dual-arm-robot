@@ -353,6 +353,20 @@ try:
 
         # Measure once per second of simulated time.
         if step_count % 240 == 0:
+            #Measure synchronization error.
+            actual_a = np.array([
+                p.getJointState(robot_a, i)[0]
+                for i in range(7)
+            ])
+
+            actual_b = np.array([
+                p.getJointState(robot_b, i)[0]
+                for i in range(7)
+            ])
+
+            sync_error = np.linalg.norm(actual_a - actual_b)
+
+            print(f"Synchronization error: {sync_error:.6f} rad")
             # Get actual end-effector position.
             link_state = p.getLinkState(
                 robot_a,
