@@ -4,15 +4,23 @@ import pybullet as p
 import pybullet_data
 import numpy as np
 from scipy.optimize import minimize
+from object_interaction import ObjectInteraction
+
+from end_effectors import (
+    create_two_finger_gripper,
+    create_suction_gripper
+)
+
+from object_interaction import ObjectInteraction
 
 #connect to the simulator.
 physics_client = p.connect(p.GUI)
 
 p.setAdditionalSearchPath(pybullet_data.getDataPath())
 p.setGravity(0, 0, -9.81)
-p.setTimeStep(1 / 240)
+p.setTimeStep(1 / 480)
 
-# Add a ground plane.
+# Add a ground plane
 ground = p.loadURDF("plane.urdf")
 
 # Load two robots facing each other.
@@ -28,7 +36,29 @@ robot_b = p.loadURDF(
     baseOrientation=p.getQuaternionFromEuler([0, 0, 3.14159]),
     useFixedBase=True
 )
+# NEW: Attach end effectors to both robots.
 
+# Robot A gets the two-finger gripper.
+gripper_a = create_two_finger_gripper(robot_a)
+
+# Robot B gets the suction gripper.
+suction_b = create_suction_gripper(robot_b)
+
+# Disable collisions between each robot and its own tool.
+for robot_id, tool_id in [
+    (robot_a, gripper_a),
+    (robot_b, suction_b)
+]:
+    for robot_link in range(-1, p.getNumJoints(robot_id)):
+        for tool_link in range(-1, p.getNumJoints(tool_id)):
+            p.setCollisionFilterPair(
+                robot_id,
+                tool_id,
+                robot_link,
+                tool_link,
+                enableCollision=0
+            )
+            
 # Create a small test object.
 collision_shape = p.createCollisionShape(
     p.GEOM_BOX,
@@ -47,7 +77,12 @@ test_object = p.createMultiBody(
     baseVisualShapeIndex=visual_shape,
     basePosition=[0, 0, 0.05]
 )
-
+# Initialize the object interaction controller.
+interaction = ObjectInteraction(
+    robot_a,
+    robot_b,
+    test_object
+)
 # Position the camera.
 p.resetDebugVisualizerCamera(
     cameraDistance=2.5,
@@ -279,7 +314,7 @@ start_angles_a = np.array(start_angles_a, dtype=float)
 start_angles_b = np.array(start_angles_b, dtype=float)
 
 #Set the trajectory duration.
-movement_duration = 5.0
+movement_duration = 1.0
 
 for joint_index in range(7):
     p.resetJointState(
@@ -297,63 +332,79 @@ for joint_index in range(7):
 print("Both arms reset to starting configurations.")
 
 # Run the physics simulation.
+
+# Run the physics simulation.
+
+SIMULATION_HZ = 240
+SIMULATION_DT = 1.0 / SIMULATION_HZ
+
+p.setTimeStep(SIMULATION_DT)
+p.setRealTimeSimulation(0)
+
 try:
     step_count = 0
 
     while p.isConnected():
-        #Calculate elapsed simulation time.
-        elapsed_time = step_count / 240.0
 
-        #Normalized progress from 0 to 1.
-        progress = min(elapsed_time / movement_duration, 1.0)
+        # Calculate elapsed simulation time.
+        elapsed_time = step_count * SIMULATION_DT
 
-        #Smooth interpolation for gradual acceleration/deceleration.
-        smooth_progress = 3 * progress**2 - 2 * progress**3
+        # Normalized trajectory progress.
+        progress = min(
+            elapsed_time / movement_duration,
+            1.0
+        )
 
-        #Check trajectory progress.
-        if step_count % 240 == 0:
-            print(
-                f"Time: {elapsed_time:.1f}s, "
-                f"Progress: {progress:.2f}, "
-                f"Smooth progress: {smooth_progress:.2f}"
-            )
+        # Smooth acceleration and deceleration.
+        smooth_progress = (
+            3 * progress**2 - 2 * progress**3
+        )
 
-        #Calculate synchronized joint targets.
+        # Calculate joint targets.
         current_angles_a = (
             start_angles_a
-            + smooth_progress * (goal_angles_a - start_angles_a)
+            + smooth_progress
+            * (goal_angles_a - start_angles_a)
         )
 
         current_angles_b = (
             start_angles_b
-            + smooth_progress * (goal_angles_b - start_angles_b)
+            + smooth_progress
+            * (goal_angles_b - start_angles_b)
         )
 
-        #Command both arms to synchronized targets.
+        # Command BOTH robots.
         for joint_index in range(7):
+
             p.setJointMotorControl2(
-                robot_a,
-                joint_index,
-                p.POSITION_CONTROL,
-                targetPosition=float(current_angles_a[joint_index]),
-                force=200
+                bodyUniqueId=robot_a,
+                jointIndex=joint_index,
+                controlMode=p.POSITION_CONTROL,
+                targetPosition=float(
+                    current_angles_a[joint_index]
+                ),
+                force=200,
+                maxVelocity=1.5
             )
 
             p.setJointMotorControl2(
-                robot_b,
-                joint_index,
-                p.POSITION_CONTROL,
-                targetPosition=float(current_angles_b[joint_index]),
-                force=200
+                bodyUniqueId=robot_b,
+                jointIndex=joint_index,
+                controlMode=p.POSITION_CONTROL,
+                targetPosition=float(
+                    current_angles_b[joint_index]
+                ),
+                force=200,
+                maxVelocity=1.5
             )
 
-        #Advance simulation.
+        # Advance physics every iteration.
         p.stepSimulation()
         step_count += 1
 
-        # Measure once per second of simulated time.
-        if step_count % 240 == 0:
-            #Measure synchronization error.
+        # Print status once per simulated second.
+        if step_count % SIMULATION_HZ == 0:
+
             actual_a = np.array([
                 p.getJointState(robot_a, i)[0]
                 for i in range(7)
@@ -364,63 +415,26 @@ try:
                 for i in range(7)
             ])
 
-            sync_error = np.linalg.norm(actual_a - actual_b)
-
-            print(f"Synchronization error: {sync_error:.6f} rad")
-            # Get actual end-effector position.
-            link_state = p.getLinkState(
-                robot_a,
-                end_effector_index,
-                computeForwardKinematics=True
+            error_a = np.linalg.norm(
+                actual_a - goal_angles_a
             )
 
-            actual_position = np.array(link_state[4])
-            desired_position = np.array(target_position)
-
-            # Calculate Euclidean positioning error.
-            error = np.linalg.norm(
-                desired_position - actual_position
+            error_b = np.linalg.norm(
+                actual_b - goal_angles_b
             )
 
             print(
-                f"End-effector error: {error * 1000:.2f} mm"
+                f"Time: {elapsed_time:.1f}s | "
+                f"Progress: {progress:.2f} | "
+                f"Robot A joint error: {error_a:.4f} | "
+                f"Robot B joint error: {error_b:.4f}"
             )
 
-            # Measure Robot B's end-effector positioning error.
-            link_state_b = p.getLinkState(
-                robot_b,
-                end_effector_index,
-                computeForwardKinematics=True
-            )
-
-            actual_position_b = np.array(link_state_b[4])
-            desired_position_b = np.array(target_position_b)
-
-            error_b = np.linalg.norm(
-                desired_position_b - actual_position_b
-            )
-
-            print(f"Robot B end-effector error: {error_b * 1000:.2f} mm")
-
-            # Compare actual joint angles against IK targets.
-            for joint_index in range(7):
-                actual_angle = p.getJointState(
-                    robot_a,
-                    joint_index
-                )[0]
-
-                target_angle = joint_angles[joint_index]
-
-                print(
-                    f"Joint {joint_index}: "
-                    f"Target = {target_angle:.3f}, "
-                    f"Actual = {actual_angle:.3f}"
-    )
-
-        time.sleep(1 / 240)
+        # Allow GUI to update without excessive delay.
+        #time.sleep(0.001)
 
 except KeyboardInterrupt:
-    pass
+    print("Simulation stopped by user.")
 
 finally:
     if p.isConnected():
